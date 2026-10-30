@@ -55,9 +55,21 @@ docker compose cp caddy:/data/caddy/pki/authorities/local/root.crt caddy-root.cr
 certutil -addstore -f "ROOT" caddy-root.crt
 ```
 
-After this any tool on the workstation trusts `https://localhost` without certificate warnings.
+After this, browsers, `curl` and other tools that use the Windows store trust `https://localhost` without certificate warnings.
 
-> **Fallback (no admin rights):** set `NODE_EXTRA_CA_CERTS` to the path of `caddy-root.crt` in the shell where OpenCode runs. This overrides the system store for Node.js processes only.
+**OpenCode does not use the Windows store.** It runs on Bun, which only trusts its bundled CA list plus `NODE_EXTRA_CA_CERTS`. Even with the root installed above, OpenCode fails with `UNABLE_TO_GET_ISSUER_CERT_LOCALLY` until `NODE_EXTRA_CA_CERTS` points at `caddy-root.crt` (no admin rights needed):
+
+```powershell
+# Persist for the user (picked up by newly started processes)
+[Environment]::SetEnvironmentVariable('NODE_EXTRA_CA_CERTS', 'C:\Work\Projects\agentic-coding-platform\proxy\caddy-root.crt', 'User')
+```
+
+Check that the exported file matches the root Caddy is serving:
+
+```powershell
+echo | openssl s_client -connect localhost:443 -servername localhost -CAfile caddy-root.crt 2>&1 | Select-String 'Verify return code'
+# Expected: Verify return code: 0 (ok)
+```
 
 ## Step 5 — issue a virtual key per developer
 
@@ -80,7 +92,17 @@ Set the virtual key in the developer's shell (add to `$PROFILE` to persist):
 
 ```powershell
 $env:OPENCODE_PROXY_API_KEY = "sk-abc123..."
+$env:NODE_EXTRA_CA_CERTS = "C:\Work\Projects\agentic-coding-platform\proxy\caddy-root.crt"
 ```
+
+`opencode.json` reads the key with OpenCode's substitution syntax, `"apiKey": "{env:OPENCODE_PROXY_API_KEY}"`. Shell-style `${OPENCODE_PROXY_API_KEY}` is **not** expanded. OpenCode sends it literally, and LiteLLM rejects it with `LiteLLM Virtual Key expected. Received=${OP****KEY}`.
+
+> **OpenCode Desktop background service:** if OpenCode Desktop is installed, it keeps an `opencode-cli serve --service` process running, and `opencode run` sends its work to that service instead of running in your shell. The service keeps the environment it was started with, so variables set later in a shell (including `NODE_EXTRA_CA_CERTS` and `OPENCODE_PROXY_API_KEY`) never reach it. Either:
+>
+> - add `--standalone` to `opencode run` to use a private server that inherits the current shell's environment, or
+> - set both variables at user level (`[Environment]::SetEnvironmentVariable(..., 'User')`), then fully quit and restart OpenCode Desktop.
+>
+> To check whether the service is running: `Get-CimInstance Win32_Process | ? CommandLine -like '*opencode-cli*serve*'`
 
 Verify the model is visible:
 
@@ -92,10 +114,31 @@ opencode models
 Run a minimal smoke test:
 
 ```bash
-opencode run --model proxy/qwen3-coder:30b-32k "reply with exactly: PROXY_OK"
+opencode run --standalone --model proxy/qwen3-coder:30b-32k "reply with exactly: PROXY_OK"
 ```
 
-Expected: response contains `PROXY_OK`, no TLS errors, no `provider.no-route` errors.
+Expected: response contains `PROXY_OK`, no TLS errors, no `provider.no-route` errors. (Drop `--standalone` once the Desktop service has been restarted with the user-level variables.)
+
+`litellm-config.yaml` sets `drop_params: true` under `litellm_settings`. OpenCode sends OpenAI-only parameters such as `store`, and without this setting the Ollama provider rejects every request with `UnsupportedParamsError: ollama does not support parameters: ['store']`.
+
+### Fallback — local Ollama when `spark-570a` is unreachable
+
+To test the proxy path without the DGX Spark, point the alias at Ollama on the workstation. Keep `model_name` unchanged so OpenCode needs no changes:
+
+```yaml
+  - model_name: qwen3-coder:30b-32k
+    litellm_params:
+      model: ollama/gpt-oss:20b                 # any model listed by `ollama list`
+      api_base: http://host.docker.internal:11434
+```
+
+Then `docker compose restart litellm`. Check that the container can reach host Ollama:
+
+```powershell
+docker exec proxy-litellm-1 python -c "import urllib.request;print(urllib.request.urlopen('http://host.docker.internal:11434/api/tags',timeout=5).read()[:200])"
+```
+
+This only proves the plumbing (TLS → key auth → routing → Ollama). The substitute model may not follow the prompt exactly; `gpt-oss:20b` answered `{ "PROXY_OK": null }`. While the fallback is in place, the "Qwen3-Coder" alias is served by a different model. Revert to `ollama/qwen3-coder:30b-32k` / `http://spark-570a:11434` when the Spark is back.
 
 ## Step 7 — verify traces reach LangFuse
 
@@ -110,6 +153,10 @@ Open LangFuse (`http://localhost:3000` by default). After the smoke test complet
 |---------|-------------|-----|
 | `provider.no-route` in OpenCode | Model name mismatch | `model_name` in `litellm-config.yaml` must equal what OpenCode sends (`qwen3-coder:30b-32k`) |
 | TLS error on `https://localhost` | CA not trusted | Redo Step 4; check `certutil -verifystore ROOT caddy-root.crt` |
+| `UNABLE_TO_GET_ISSUER_CERT_LOCALLY` in OpenCode, but `curl`/openssl verify fine | OpenCode (Bun) ignores the Windows store, or the Desktop background service was started without `NODE_EXTRA_CA_CERTS` | Set `NODE_EXTRA_CA_CERTS`; use `opencode run --standalone` or restart OpenCode Desktop (Step 6) |
+| `LiteLLM Virtual Key expected. Received=${OP****KEY}` | `opencode.json` uses `${VAR}` syntax | Use `"apiKey": "{env:OPENCODE_PROXY_API_KEY}"` |
+| `UnsupportedParamsError: ollama does not support parameters: ['store']` | OpenAI-only param forwarded to Ollama | Set `drop_params: true` under `litellm_settings` |
+| Requests hang / connection errors to `spark-570a:11434` | Spark unreachable | Use the local Ollama fallback in Step 6 |
 | `429 Too Many Requests` | Concurrency cap hit | Increase `max_parallel_requests` in `litellm-config.yaml` or wait for an active generation to finish |
 | No traces in LangFuse | OTEL Collector not reachable | Check `OTEL_EXPORTER_OTLP_ENDPOINT` in `.env` and that the observability stack is up |
 | Context defaults to 8K | Model alias missing `num_ctx` | Verify `num_ctx: 32768` is in `litellm-config.yaml` under `litellm_params` |

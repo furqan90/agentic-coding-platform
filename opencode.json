@@ -7,7 +7,7 @@
       "name": "LiteLLM proxy (DGX Spark)",
       "options": {
         "baseURL": "https://localhost/v1",
-        "apiKey": "${OPENCODE_PROXY_API_KEY}"
+        "apiKey": "{env:OPENCODE_PROXY_API_KEY}"
       },
       "models": {
         "qwen3-coder:30b-32k": {
