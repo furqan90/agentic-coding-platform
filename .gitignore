@@ -1,0 +1,23 @@
+# Secrets — copy proxy/.env.example to proxy/.env and fill in locally
+.env
+.env.*
+!.env.example
+
+# Caddy local CA exported per machine (Step 4 of docs/proxy-setup.md)
+*.crt
+*.pem
+*.key
+
+# OpenCode local state
+.opencode/
+
+# Editor / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs and scratch output
+*.log
