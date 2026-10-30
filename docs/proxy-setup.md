@@ -159,4 +159,6 @@ Open LangFuse (`http://localhost:3000` by default). After the smoke test complet
 | Requests hang / connection errors to `spark-570a:11434` | Spark unreachable | Use the local Ollama fallback in Step 6 |
 | `429 Too Many Requests` | Concurrency cap hit | Increase `max_parallel_requests` in `litellm-config.yaml` or wait for an active generation to finish |
 | No traces in LangFuse | OTEL Collector not reachable | Check `OTEL_EXPORTER_OTLP_ENDPOINT` in `.env` and that the observability stack is up |
+| LiteLLM logs `BadStatusLine('\x00\x00\x06\x04…')` / `Failed to export spans batch`, no traces in LangFuse | LiteLLM defaults to OTLP/HTTP but `:4317` is the collector's gRPC port | Keep `OTEL_EXPORTER_OTLP_PROTOCOL: grpc` in `docker-compose.yaml`, or point the endpoint at `:4318` and drop it |
+| Traces land in the wrong LangFuse project | Project is chosen by the collector's `LANGFUSE_OTEL_AUTH` keys, not by the client | Change those keys in the observability stack; per-client routing is planned in `agentic-observability-platform/PROJECT-ROUTING-PLAN.md` |
 | Context defaults to 8K | Model alias missing `num_ctx` | Verify `num_ctx: 32768` is in `litellm-config.yaml` under `litellm_params` |

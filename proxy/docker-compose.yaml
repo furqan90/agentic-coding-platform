@@ -18,6 +18,8 @@ services:
     environment:
       LITELLM_MASTER_KEY: "${LITELLM_MASTER_KEY}"
       OTEL_EXPORTER_OTLP_ENDPOINT: "${OTEL_EXPORTER_OTLP_ENDPOINT:-http://host.docker.internal:4317}"
+      # 4317 is the collector's gRPC port; without this LiteLLM defaults to OTLP/HTTP and every export fails.
+      OTEL_EXPORTER_OTLP_PROTOCOL: grpc
       DATABASE_URL: "postgresql://litellm:${LITELLM_DB_PASSWORD:-litellm}@postgres:5432/litellm"
     command: ["--config", "/app/config.yaml", "--port", "4000"]
     depends_on:
