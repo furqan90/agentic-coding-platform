@@ -1,0 +1,18 @@
+model_list:
+  - model_name: qwen3-coder:30b-32k        # the name OpenCode sends in each request
+    litellm_params:
+      model: ollama/qwen3-coder:30b-32k    # routed to Ollama via its native provider
+      api_base: http://spark-570a:11434
+      num_ctx: 32768                        # force 32K context; Ollama's default is 8K
+    model_info:
+      max_tokens: 4096
+      max_input_tokens: 32768
+
+litellm_settings:
+  success_callback: ["otel"]               # emit OTLP spans for every completed call
+  max_parallel_requests: 2                 # provisional DGX Spark concurrency cap
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY
+  # Issue per-user virtual keys via: POST /key/generate  Authorization: Bearer <master_key>
+  # To switch to a remote deployment, change only api_base above (and baseURL in opencode.json).
