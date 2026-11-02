@@ -20,6 +20,9 @@ services:
       OTEL_EXPORTER_OTLP_ENDPOINT: "${OTEL_EXPORTER_OTLP_ENDPOINT:-http://host.docker.internal:4317}"
       # 4317 is the collector's gRPC port; without this LiteLLM defaults to OTLP/HTTP and every export fails.
       OTEL_EXPORTER_OTLP_PROTOCOL: grpc
+      # Langfuse project the collector routes these traces to (slug from the observability
+      # platform's otel/projects.yaml). Unregistered slugs fall back to its default project.
+      OTEL_RESOURCE_ATTRIBUTES: "tl.project=${LANGFUSE_PROJECT:-agentic-coding-platform}"
       DATABASE_URL: "postgresql://litellm:${LITELLM_DB_PASSWORD:-litellm}@postgres:5432/litellm"
     command: ["--config", "/app/config.yaml", "--port", "4000"]
     depends_on:

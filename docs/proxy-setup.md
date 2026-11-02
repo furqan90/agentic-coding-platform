@@ -142,10 +142,27 @@ This only proves the plumbing (TLS → key auth → routing → Ollama). The sub
 
 ## Step 7 — verify traces reach LangFuse
 
-Open LangFuse (`http://localhost:3000` by default). After the smoke test completes, a trace should appear with:
+LiteLLM stamps every span with the resource attribute `tl.project=agentic-coding-platform` (`OTEL_RESOURCE_ATTRIBUTES` in `docker-compose.yaml`; override with `LANGFUSE_PROJECT` in `.env`). The observability platform's collector routes on it to the matching LangFuse project. See `agentic-observability-platform/docs/MULTI-PROJECT.md`.
 
-- `gen_ai.request.model = qwen3-coder:30b-32k`
-- No PII fields (`user.email`, `user.ip`, `client.ssn` are redacted by the OTEL Collector processor)
+One-time registration in `agentic-observability-platform` (already done for `agentic-coding-platform`):
+
+1. Create the project in LangFuse and an API key pair for it (Project → Settings → API Keys).
+2. Add the slug under `projects:` in `otel/projects.yaml`, then run `python scripts/gen-collector-config.py` (needs `pyyaml`).
+3. Add `LANGFUSE_OTEL_AUTH_AGENTIC_CODING_PLATFORM=<base64("pk-lf-…:sk-lf-…")>` to `otel/langfuse-projects.env` (gitignored).
+4. Recreate the collector: `docker compose -f docker-compose/docker-compose.yml --env-file .env up -d --no-deps --force-recreate otel-collector`. It is shared by other stacks; untagged traces keep going to the default project.
+
+After the smoke test completes:
+
+- Span metrics carry the project label (about 15 s flush):
+  ```powershell
+  curl.exe -s http://localhost:8889/metrics | Select-String 'service_name="litellm".*tl_project="agentic-coding-platform"'
+  ```
+- In LangFuse (`http://localhost:3000`) the trace appears in the **agentic-coding-platform** project, not in the default project, with:
+  - `gen_ai.request.model = qwen3-coder:30b-32k`
+  - No PII fields (`user.email`, `user.ip`, `client.ssn` are redacted by the OTEL Collector processor)
+- Grafana's Agent Ops dashboard can be filtered with its **Project** variable. RED panels include LiteLLM; the cost panel does not, because `agent_tokens_total` and `agent_cost_usd_total` come from the platform's SDK, which LiteLLM doesn't use.
+
+`LANGFUSE_PROJECT` here is only a compose variable that fills in `OTEL_RESOURCE_ATTRIBUTES`; LiteLLM itself doesn't read it.
 
 ## Troubleshooting
 
@@ -160,5 +177,6 @@ Open LangFuse (`http://localhost:3000` by default). After the smoke test complet
 | `429 Too Many Requests` | Concurrency cap hit | Increase `max_parallel_requests` in `litellm-config.yaml` or wait for an active generation to finish |
 | No traces in LangFuse | OTEL Collector not reachable | Check `OTEL_EXPORTER_OTLP_ENDPOINT` in `.env` and that the observability stack is up |
 | LiteLLM logs `BadStatusLine('\x00\x00\x06\x04…')` / `Failed to export spans batch`, no traces in LangFuse | LiteLLM defaults to OTLP/HTTP but `:4317` is the collector's gRPC port | Keep `OTEL_EXPORTER_OTLP_PROTOCOL: grpc` in `docker-compose.yaml`, or point the endpoint at `:4318` and drop it |
-| Traces land in the wrong LangFuse project | Project is chosen by the collector's `LANGFUSE_OTEL_AUTH` keys, not by the client | Change those keys in the observability stack; per-client routing is planned in `agentic-observability-platform/PROJECT-ROUTING-PLAN.md` |
+| Traces land in the default LangFuse project instead of `agentic-coding-platform` | Slug not registered in the collector's `otel/projects.yaml`, typo in `LANGFUSE_PROJECT`, or collector not recreated after registering (unknown slugs fall back silently) | `docker exec proxy-litellm-1 env \| grep OTEL_RESOURCE`; check the slug in `projects.yaml`; regenerate and recreate the collector (Step 7) |
+| Collector logs `401` for `otlp_http/langfuse-agentic-coding-platform` | `LANGFUSE_OTEL_AUTH_AGENTIC_CODING_PLATFORM` missing or wrong in `otel/langfuse-projects.env` | Re-encode the project's `pk:sk`, recreate the collector |
 | Context defaults to 8K | Model alias missing `num_ctx` | Verify `num_ctx: 32768` is in `litellm-config.yaml` under `litellm_params` |
