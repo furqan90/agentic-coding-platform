@@ -1,12 +1,13 @@
 # Proxy setup runbook
 
-Step-by-step guide to bring up the Caddy + LiteLLM proxy stack on a developer workstation and connect it to the existing observability stack.
+Step-by-step guide to bring up the proxy stack (Caddy, LiteLLM, Postgres and the onboarding UI) and connect it to the observability stack. Steps 1–8 set up a per-workstation proxy at `https://localhost`. [Shared proxy](#shared-proxy-one-proxy-for-many-developers) covers one proxy for a team. For how the pieces fit together, see [architecture.md](architecture.md).
 
 ## Prerequisites
 
 - Docker Desktop running (Windows or Mac)
 - Access to the `agentic-observability-platform` repo and its stack already started
-- Network access to `spark-570a` on port 11434
+- Network access to `spark-570a` on port 11434 (or a local Ollama for the [fallback](#fallback--local-ollama-when-spark-570a-is-unreachable))
+- Windows PowerShell 5.1 or later for the scripts in `proxy/scripts/`
 
 ## Step 1 — start the observability stack
 
@@ -42,7 +43,7 @@ docker compose ps
 docker compose logs litellm --tail 20
 ```
 
-LiteLLM prints `LiteLLM: Proxy initialized` when ready.
+This starts `caddy`, `litellm`, `postgres` and `onboarding` (built from `proxy/onboarding-ui/` on first start). LiteLLM prints `LiteLLM: Proxy initialized` when ready. The onboarding UI stays locked until it is set up ([onboarding/README.md](../onboarding/README.md), "Admin UI"); the per-workstation steps below don't need it.
 
 ## Step 4 — trust Caddy's local CA (one-time, per machine)
 
@@ -74,18 +75,18 @@ If the `caddy_data` volume is ever deleted (e.g. `docker compose down -v`), Cadd
 
 ## Step 5 — issue a virtual key per developer
 
-Replace `<master-key>` with the value from `.env`:
+The admin UI at `https://<proxy>/admin/onboarding/` does this for you, and also produces the onboarding file `bootstrap.ps1` needs ([onboarding/README.md](../onboarding/README.md)). To issue a key directly, replace `<master-key>` with the value from `.env`:
 
 ```bash
 curl -X POST https://localhost/key/generate \
   -H "Authorization: Bearer <master-key>" \
   -H "Content-Type: application/json" \
-  -d '{"user_id": "alice", "max_parallel_requests": 2}'
+  -d '{"user_id": "alice@corp.example", "key_alias": "alice@corp.example", "max_parallel_requests": 2}'
 ```
 
 The response contains a `key` field (e.g. `sk-abc123…`). This is the value each developer sets as `OPENCODE_PROXY_API_KEY`.
 
-Repeat for each developer. Keys are stored in LiteLLM's internal database and survive container restarts.
+Repeat for each developer. Keys are stored hashed in the `postgres` service (`postgres_data` volume) and survive container restarts, but the plaintext key is only returned now. Setting `key_alias` to the email lets the admin UI list, re-issue and revoke the key.
 
 ## Step 6 — configure OpenCode and smoke test
 
@@ -125,13 +126,15 @@ Expected: response contains `PROXY_OK`, no TLS errors, no `provider.no-route` er
 
 ### Fallback — local Ollama when `spark-570a` is unreachable
 
-To test the proxy path without the DGX Spark, point the alias at Ollama on the workstation. Keep `model_name` unchanged so OpenCode needs no changes:
+To test the proxy path without the DGX Spark, point the alias at Ollama on the proxy host. Keep `model_name` unchanged so OpenCode needs no changes. The closest substitute is the same model pulled locally (`ollama pull qwen3-coder:30b`, about 18 GB), with `num_ctx` keeping the 32K context:
 
 ```yaml
   - model_name: qwen3-coder:30b-32k
     litellm_params:
-      model: ollama_chat/gpt-oss:20b            # any model listed by `ollama list`; keep the ollama_chat/ prefix
+      # TEMP: spark-570a unreachable. Restore: ollama_chat/qwen3-coder:30b-32k, http://spark-570a:11434
+      model: ollama_chat/qwen3-coder:30b        # any model listed by `ollama list`; keep the ollama_chat/ prefix
       api_base: http://host.docker.internal:11434
+      num_ctx: 32768
 ```
 
 Then `docker compose restart litellm`. Check that the container can reach host Ollama:
@@ -140,7 +143,7 @@ Then `docker compose restart litellm`. Check that the container can reach host O
 docker exec proxy-litellm-1 python -c "import urllib.request;print(urllib.request.urlopen('http://host.docker.internal:11434/api/tags',timeout=5).read()[:200])"
 ```
 
-This only proves the plumbing (TLS → key auth → routing → Ollama). The substitute model may not follow the prompt exactly; `gpt-oss:20b` answered `{ "PROXY_OK": null }`. While the fallback is in place, the "Qwen3-Coder" alias is served by a different model. Revert to `ollama_chat/qwen3-coder:30b-32k` / `http://spark-570a:11434` when the Spark is back.
+With the same model, results are comparable for quality, but not for speed or capacity: the workstation's GPU, not the Spark, does the work. A different model (e.g. `gpt-oss:20b`) only proves the plumbing (TLS → key auth → routing → Ollama); `gpt-oss:20b` answered the smoke test with `{ "PROXY_OK": null }`. Either way, record the substitute with any measurements taken while it is in place (testbed rows don't record the backend), and revert when the Spark is back.
 
 Use the `ollama_chat/` prefix, not `ollama/`. `ollama_chat/` calls Ollama's `/api/chat` and passes OpenCode's tools natively. `ollama/` calls `/api/generate`, pastes the tools into the prompt and sets `format: json`, so the model can only answer with JSON. Every reply is parsed as a tool call, and an agent turn never ends with a text answer.
 
@@ -257,8 +260,10 @@ Never copy `root.key` or `intermediate.key` off the proxy host. Anyone holding `
 | `UNABLE_TO_GET_ISSUER_CERT_LOCALLY` in OpenCode, but `curl`/openssl verify fine | OpenCode (Bun) ignores the Windows store, or the Desktop background service was started without `NODE_EXTRA_CA_CERTS` | Set `NODE_EXTRA_CA_CERTS`; use `opencode run --standalone` or restart OpenCode Desktop (Step 6) |
 | `LiteLLM Virtual Key expected. Received=${OP****KEY}` | `opencode.json` uses `${VAR}` syntax | Use `"apiKey": "{env:OPENCODE_PROXY_API_KEY}"` |
 | `UnsupportedParamsError: ollama does not support parameters: ['store']` | OpenAI-only param forwarded to Ollama | Set `drop_params: true` under `litellm_settings` |
-| Requests hang / connection errors to `spark-570a:11434` | Spark unreachable | Use the local Ollama fallback in Step 6 |
-| `429 Too Many Requests` | Concurrency cap hit | Increase `max_parallel_requests` in `litellm-config.yaml` or wait for an active generation to finish |
+| Requests hang / connection errors to `spark-570a:11434` | Spark unreachable | Use the [local Ollama fallback](#fallback--local-ollama-when-spark-570a-is-unreachable) in Step 6 |
+| `429 Too Many Requests` | Concurrency cap hit, global (`max_parallel_requests` in `litellm-config.yaml`) or per key (set at issue time) | Wait for an active generation to finish, or raise the limit. The cap is provisional; see [PROJECT_NOTES.md](../PROJECT_NOTES.md) before raising it |
+| Admin UI: every login fails | `ONBOARDING_ADMIN_HASH` not set (the default hash is of a discarded password), or set without single quotes so compose expanded its `$` | Set it in `.env` in single quotes; `docker compose --env-file .env up -d caddy` |
+| Admin UI refuses to issue keys | `proxy/certs/proxy-root-ca.crt` missing | Run `.\proxy\scripts\export-ca.ps1` |
 | No traces in LangFuse | OTEL Collector not reachable | Check `OTEL_EXPORTER_OTLP_ENDPOINT` in `.env` and that the observability stack is up |
 | LiteLLM logs `BadStatusLine('\x00\x00\x06\x04…')` / `Failed to export spans batch`, no traces in LangFuse | LiteLLM defaults to OTLP/HTTP but `:4317` is the collector's gRPC port | Keep `OTEL_EXPORTER_OTLP_PROTOCOL: grpc` in `docker-compose.yaml`, or point the endpoint at `:4318` and drop it |
 | Traces land in the default LangFuse project instead of `agentic-coding-platform` | Slug not registered in the collector's `otel/projects.yaml`, typo in `LANGFUSE_PROJECT`, or collector not recreated after registering (unknown slugs fall back silently) | `docker exec proxy-litellm-1 env \| grep OTEL_RESOURCE`; check the slug in `projects.yaml`; regenerate and recreate the collector (Step 7) |

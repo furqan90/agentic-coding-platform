@@ -8,6 +8,9 @@
 *.pem
 *.key
 
+# Onboarding files issued by the admin UI contain an API key, wherever they are saved
+onboarding-*.json
+
 # OpenCode local state
 .opencode/
 

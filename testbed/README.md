@@ -72,7 +72,9 @@ Run it on any workspace, whichever channel produced it:
 1. copies the task's hidden `acceptance/` tests into the workspace, runs them with the workspace's own `tests/`, and removes them again
 2. fails the run if a path listed under `protected` in `task.json` differs from the `baseline` git tag, or a file under `min_tests` has fewer tests than required
 3. finds the workspace's OpenCode session (a workspace is its own git repo, so it is the only session there) and summarises it: outcome, steps, tool calls, failed tool calls, tokens
-4. appends one JSON line to `testbed\results\runs.jsonl`
+4. appends one JSON line to `testbed\results\runs.jsonl` (gitignored)
+
+The row doesn't record which model or backend served the run. If `litellm-config.yaml` is temporarily pointed at another backend (e.g. local Ollama while the Spark is down), note that alongside the results.
 
 `git -C <workspace> diff baseline` shows exactly what the agent changed.
 
@@ -82,7 +84,7 @@ Open the **agentic-coding-platform** project and filter **Sessions** by the sess
 
 ## Repeat and concurrency runs
 
-`runs.jsonl` keeps one row per run, so warm repeats are just the same command again. For concurrent sessions, start `run-task.ps1` in two or more terminals at once. Each gets its own workspace, and LiteLLM's `max_parallel_requests` (2) queues the rest. That covers the cold/warm and 2- and 4-session measurements in `PROJECT_NOTES.md`.
+`runs.jsonl` keeps one row per run, so warm repeats are just the same command again. For concurrent sessions, start `run-task.ps1` in two or more terminals at once. Each gets its own workspace. LiteLLM's `max_parallel_requests` (2) limits how many model calls run at once; check the LiteLLM logs and the run's failed steps for `429`s to see whether calls over the cap were rejected rather than queued. That covers the cold/warm and 2- and 4-session measurements in `PROJECT_NOTES.md`.
 
 ## Adding a task
 

@@ -1,15 +1,39 @@
 # OpenCode + DGX Spark feasibility notes
 
-Last updated: 2026-10-20
+Last updated: 2026-11-11 (sections dated 2026-10-20 are kept as recorded)
 
 ## Goal
 
 Evaluate OpenCode as the organization's agentic coding platform, using a remotely served Ollama endpoint on one NVIDIA DGX Spark. Establish coding quality, interactive speed, and realistic concurrency while accounting for occasional bursty workloads on the Spark.
 
-## Current setup
+## Status 2026-11-11
+
+What exists now (details in [docs/architecture.md](docs/architecture.md)):
+
+- **Proxy in front of Ollama:** Caddy (TLS) → LiteLLM (per-developer virtual keys in Postgres, `max_parallel_requests: 2`) → Ollama. This addresses the operational note below: Ollama no longer has to be reachable by developers, only by the proxy.
+- **Tracing:** every model call is exported to the shared observability stack and lands in the Langfuse project `agentic-coding-platform`, named `opencode` and grouped by OpenCode session ID.
+- **Onboarding for a shared proxy:** an admin UI issues a key and an onboarding file per email. `onboarding/bootstrap.ps1` sets up a clean Windows machine from that file (verified CA, pinned OpenCode CLI, environment, config, smoke test). `onboarding/new-sandbox-kit.ps1` builds a Windows Sandbox kit for testing it on a clean machine.
+- **Testbed:** a small Python project with three issue-style tasks (bug fix, multi-file feature, test repair). Each run is judged by hidden acceptance tests and recorded in `testbed/results/runs.jsonl`. This is next action 1 below, with a purpose-built project instead of `secp-leap-portal`.
+- **Agent-loop fix:** OpenCode turns never ended while LiteLLM routed with `ollama/` (`/api/generate`, forced JSON). Routing with `ollama_chat/` fixed it. Results from before that fix shouldn't be compared with later ones.
+
+**Temporary state:** `spark-570a:11434` is unreachable as of 2026-11-11. `proxy/litellm-config.yaml` (uncommitted change) serves the `qwen3-coder:30b-32k` alias from a local `qwen3-coder:30b` on the workstation, with `num_ctx: 32768`. Same model and context, so the outcomes are indicative for quality, but the speed and capacity figures don't apply to the Spark. Revert before any capacity measurement.
+
+### First testbed runs 2026-11-11 (CLI, `qwen3-coder:30b-32k` alias, single session)
+
+The backend for these runs isn't recorded in `runs.jsonl`. They were most likely served by the local fallback above.
+
+| Task | Result | Wall time | Steps / tool calls | Input / output tokens | Notes |
+|------|--------|----------:|-------------------:|----------------------:|-------|
+| 01-bulk-discount | FAIL | 178 s | 1 / 0 | 8,539 / 45 | Agent replied in text without changing anything; 2 tests still failing |
+| 01-bulk-discount | PASS | 339 s | 12 / 11 | 122,459 / 1,771 | Fixed `pricing.py` and updated `test_pricing.py` |
+| 02-sales-tax | FAIL (time limit) | 542 s | 16 / 16 | 171,185 / 2,138 | Created `tax.py`, edited `cart.py` and `receipt.py`; 3 test collection errors at cutoff |
+
+Early reading: tool calls work end to end (no failed tool calls), but behaviour on the same task varies between runs, and a multi-file feature didn't finish within 10 minutes. Input tokens grow quickly, to 120–170K per task, because each step resends the context. Three runs are too few for conclusions.
+
+## Original setup (2026-10-20)
 
 - OpenCode is installed.
-- Ollama is reachable from the host at `http://spark-570a:11434`.
+- Ollama is reachable from the host at `http://spark-570a:11434` (unreachable as of 2026-11-11; see Status).
 - The Spark is an NVIDIA DGX Spark with 128 GB unified memory. NVIDIA lists 273 GB/s memory bandwidth.
 - Initial audience is about 50 users. This is a user/seat count, not a measured 50-way simultaneous inference requirement.
 - Some other workloads share the Spark; they are bursty rather than continuously active.
@@ -86,13 +110,15 @@ The 2- and 4-request results suggest good short-request throughput at these leve
 
 ## Next actions
 
-1. **Choose a representative repository and tasks.** Use a non-critical codebase with its normal build/test workflow. Select three tasks: a small bug fix, a bounded multi-file change, and a test-failure repair. Avoid synthetic prompts as the main quality signal.
-2. **Run a realistic single-user baseline through OpenCode.** Keep `qwen3-coder:30b-32k` fixed. Record model/context, task, time to first response, total task time, tool-call errors, output speed if available, and whether the repository checks pass. Repeat warm runs.
+Status as of 2026-11-11 in **bold** after each item.
+
+1. **Choose a representative repository and tasks.** **Done for a first pass: the testbed. A bounded task in a real repository (e.g. `secp-leap-portal`) is still worth adding before conclusions about quality.** Use a non-critical codebase with its normal build/test workflow. Select three tasks: a small bug fix, a bounded multi-file change, and a test-failure repair. Avoid synthetic prompts as the main quality signal.
+2. **Run a realistic single-user baseline through OpenCode.** Keep `qwen3-coder:30b-32k` fixed. Record model/context, task, time to first response, total task time, tool-call errors, output speed if available, and whether the repository checks pass. Repeat warm runs. **Started (3 runs above). Needs the Spark back, several runs per task, and time to first response, which the testbed doesn't capture yet.**
 3. **Set an experience target with the pilot users.** Agree what feels acceptable for initial response, generated-token speed, and total task wait. Use this to define a pass/fail threshold before increasing concurrency.
-4. **Measure concurrent OpenCode sessions.** Start at 2 active sessions, then try 4 if the first level meets the target. Use representative tasks, not only short API completions. Record p50/p95 latency, queue time, errors, task outcomes, and Spark memory/compute use.
+4. **Measure concurrent OpenCode sessions.** Start at 2 active sessions, then try 4 if the first level meets the target. Use representative tasks, not only short API completions. Record p50/p95 latency, queue time, errors, task outcomes, and Spark memory/compute use. **Not started. The testbed supports it (several `run-task.ps1` in parallel). Also confirm whether calls over the LiteLLM cap are rejected (`429`) or queued, and how OpenCode handles it.**
 5. **Repeat during a real burst workload.** Compare normal and burst conditions. If the burst cannot be scheduled during the evaluation, record it as an unmeasured condition and keep the active-session cap conservative.
 6. **Set the pilot admission policy.** Decide how many active generations to allow, what happens to excess requests (queue or reject/retry), and whether burst workloads have priority. Separate the number of licensed/eligible users from simultaneous request capacity.
-7. **Prepare organization access before expanding beyond the pilot.** Keep Ollama behind an authenticated gateway or trusted private network because its local API has no authentication. Add request limits and basic health/latency monitoring, then pilot with a small developer group before onboarding all 50 users.
+7. **Prepare organization access before expanding beyond the pilot.** Keep Ollama behind an authenticated gateway or trusted private network because its local API has no authentication. Add request limits and basic health/latency monitoring, then pilot with a small developer group before onboarding all 50 users. **Largely in place: authenticated proxy, per-key and global limits, tracing and RED metrics, onboarding flow. Open: a stable proxy host name, a company-issued certificate instead of `tls internal`, firewalling Ollama to the proxy host, alerting, and what traced prompt/code content may be retained in Langfuse.**
 
 Immediate next input needed: a representative repository/task and the normal checks we should use. Current measured evidence supports an initial 2-active-session cap; it does not establish long-prompt or burst-load capacity.
 
@@ -107,6 +133,8 @@ Immediate next input needed: a representative repository/task and the normal che
 Record per run: date/time, model tag, context length, concurrency, other-workload state, cold/warm state, time to first token, total response/task time, generated tokens/s if available, queue/errors, and coding-task outcome.
 
 ## Measurements still needed
+
+(Ollama version and context are now recorded above, and tool calls through the proxy are confirmed. Remaining:)
 
 - Exact Ollama version and active server settings, especially context length and parallel request setting.
 - Actual OpenCode model/provider configuration and confirmation that tool calls work through the remote endpoint.
