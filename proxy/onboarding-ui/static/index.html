@@ -1,0 +1,236 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Developer Onboarding</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #ffffff; --text: #1d2330; --muted: #5d6677; --border: #dde1e8;
+    --accent: #2457c5; --accent-text: #ffffff; --danger: #b42318; --ok: #157f3b; --warn-bg: #fff6e0; --warn-border: #e8c46a;
+    --code-bg: #f0f2f6;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #12151b; --panel: #1b2029; --text: #e6e9ef; --muted: #9aa3b2; --border: #2c3340;
+      --accent: #6b9bff; --accent-text: #0d1117; --danger: #ff7b72; --ok: #56d364; --warn-bg: #2b2414; --warn-border: #7a6224;
+      --code-bg: #232a35;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 1040px; margin: 0 auto; padding: 24px 16px 48px; }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  h2 { font-size: 16px; margin: 0 0 12px; }
+  .sub { color: var(--muted); margin: 0 0 20px; }
+  section { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 18px; margin-bottom: 16px; }
+  dl { display: grid; grid-template-columns: max-content 1fr; gap: 6px 16px; margin: 0; }
+  dt { color: var(--muted); }
+  dd { margin: 0; overflow-wrap: anywhere; }
+  code, .mono { font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; font-size: 13px; }
+  code { background: var(--code-bg); padding: 1px 5px; border-radius: 4px; }
+  form { display: flex; gap: 8px; flex-wrap: wrap; }
+  input[type=email] { flex: 1 1 260px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--text); font: inherit; }
+  a { color: var(--accent); }
+  a.button { display: inline-block; text-decoration: none; }
+  button, a.button { padding: 8px 14px; border-radius: 6px; border: 1px solid var(--border); background: var(--panel); color: var(--text); font: inherit; cursor: pointer; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
+  button.danger { color: var(--danger); }
+  button:disabled { opacity: .55; cursor: default; }
+  .msg { margin-top: 10px; min-height: 1.5em; }
+  .msg.error { color: var(--danger); }
+  .msg.ok { color: var(--ok); }
+  .result { margin-top: 14px; border: 1px solid var(--warn-border); background: var(--warn-bg); border-radius: 8px; padding: 14px; }
+  .result[hidden] { display: none; }
+  pre { background: var(--code-bg); padding: 10px; border-radius: 6px; overflow-x: auto; margin: 8px 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  .table-wrap { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); vertical-align: middle; white-space: nowrap; }
+  th { color: var(--muted); font-weight: 600; font-size: 13px; }
+  td.actions { text-align: right; }
+  .tag { font-size: 12px; padding: 1px 7px; border-radius: 10px; border: 1px solid var(--border); color: var(--muted); }
+  .empty { color: var(--muted); }
+  label.toggle { color: var(--muted); font-size: 14px; display: inline-flex; gap: 6px; align-items: center; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Developer onboarding</h1>
+  <p class="sub">Issue a proxy key for a developer and hand them the onboarding file for <code>bootstrap.ps1</code>.</p>
+
+  <section>
+    <h2>Proxy</h2>
+    <dl>
+      <dt>Public URL</dt><dd id="s-url" class="mono">…</dd>
+      <dt>CA fingerprint</dt><dd id="s-ca" class="mono">…</dd>
+      <dt>Models</dt><dd id="s-models">…</dd>
+      <dt>OpenCode</dt><dd id="s-oc">…</dd>
+      <dt>Developer script</dt><dd><a id="s-bootstrap" href="bootstrap.ps1" download>bootstrap.ps1</a></dd>
+    </dl>
+  </section>
+
+  <section>
+    <h2>Issue a key</h2>
+    <form id="issue-form">
+      <input id="email" type="email" required placeholder="developer@company.example" autocomplete="off">
+      <button class="primary" type="submit" id="issue-btn">Issue key</button>
+    </form>
+    <div id="issue-msg" class="msg"></div>
+    <div id="result" class="result" hidden>
+      <strong>Onboarding file for <span id="r-email"></span> downloaded.</strong>
+      This is the only time the key is available. If the file is lost, re-issue the key.
+      Send the file through a private channel (it contains the key), together with <code>bootstrap.ps1</code> (same for everyone). The developer puts both in one folder and runs:
+      <pre id="r-cmd" class="mono"></pre>
+      <div class="row">
+        <button type="button" id="r-download">Download again</button>
+        <a class="button" href="bootstrap.ps1" download>Download bootstrap.ps1</a>
+        <button type="button" id="r-copy">Copy command</button>
+        <button type="button" id="r-dismiss">Done</button>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="row" style="justify-content: space-between; margin-bottom: 8px;">
+      <h2 style="margin: 0;">Issued keys</h2>
+      <div class="row">
+        <label class="toggle"><input type="checkbox" id="show-all"> Show keys not issued here</label>
+        <button type="button" id="refresh">Refresh</button>
+      </div>
+    </div>
+    <div id="keys-msg" class="msg"></div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Email</th><th>Issued</th><th>Last active</th><th>Spend</th><th>Parallel</th><th>Issued by</th><th></th></tr></thead>
+        <tbody id="keys"></tbody>
+      </table>
+    </div>
+  </section>
+</main>
+
+<script>
+  const $ = (id) => document.getElementById(id);
+  let lastFile = null;
+  let allKeys = [];
+
+  async function api(path, body) {
+    const opts = body === undefined ? {} : { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) };
+    const res = await fetch(path, opts);
+    let data = null;
+    try { data = await res.json(); } catch { /* non-JSON error */ }
+    if (!res.ok) throw new Error((data && data.detail) || `${res.status} ${res.statusText}`);
+    return data;
+  }
+
+  function setMsg(el, text, kind) { el.textContent = text || ""; el.className = "msg" + (kind ? " " + kind : ""); }
+  function fmtDate(v) { if (!v) return "—"; const d = new Date(v); return isNaN(d) ? String(v) : d.toLocaleString(); }
+
+  function download(file) {
+    const blob = new Blob([JSON.stringify(file, null, 2)], { type: "application/json" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = `onboarding-${file.email.replace(/[^a-z0-9._-]+/gi, "_")}.json`;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  }
+
+  function showResult(file) {
+    lastFile = file;
+    download(file);
+    const name = `onboarding-${file.email.replace(/[^a-z0-9._-]+/gi, "_")}.json`;
+    $("r-email").textContent = file.email;
+    $("r-cmd").textContent = `powershell -ExecutionPolicy Bypass -File .\\bootstrap.ps1 -Config .\\${name}`;
+    $("result").hidden = false;
+  }
+
+  async function loadStatus() {
+    try {
+      const s = await api("api/status");
+      $("s-url").textContent = s.public_proxy_url;
+      $("s-ca").textContent = s.ca_error ? "" : `SHA256 ${s.ca_fingerprint_sha256}`;
+      if (s.ca_error) { const e = document.createElement("span"); e.className = "msg error"; e.textContent = s.ca_error; $("s-ca").appendChild(e); }
+      $("s-models").textContent = s.models_error ? s.models_error
+        : s.models.map((m) => `${m.id} (${m.context.toLocaleString()} ctx${m.id === s.default_model ? ", default" : ""})`).join(", ") || "none";
+      $("s-oc").textContent = `CLI ${s.opencode_version}`;
+      if (!s.bootstrap_available) { const b = $("s-bootstrap"); b.removeAttribute("href"); b.textContent = "not available (check the bootstrap.ps1 volume in docker-compose.yaml)"; }
+      const ready = !s.ca_error && !s.models_error && s.models.length > 0;
+      $("issue-btn").disabled = !ready;
+      if (!ready) setMsg($("issue-msg"), "Issuing is disabled until the proxy details above are available.", "error");
+    } catch (e) {
+      $("s-url").textContent = `Could not load status: ${e.message}`;
+      $("issue-btn").disabled = true;
+    }
+  }
+
+  function renderKeys() {
+    const tbody = $("keys");
+    tbody.replaceChildren();
+    const rows = $("show-all").checked ? allKeys : allKeys.filter((k) => k.issued_via === "onboarding-ui");
+    if (!rows.length) {
+      const tr = tbody.insertRow(); const td = tr.insertCell(); td.colSpan = 7; td.className = "empty";
+      td.textContent = allKeys.length ? "No keys issued here yet (tick the box to see others)." : "No keys yet.";
+      return;
+    }
+    for (const k of rows) {
+      const tr = tbody.insertRow();
+      const email = k.alias || k.user_id || "(no alias)";
+      const cells = [email, fmtDate(k.created_at), fmtDate(k.last_active), `$${Number(k.spend).toFixed(4)}`, k.max_parallel_requests ?? "—", k.issued_by || "—"];
+      cells.forEach((v, i) => { const td = tr.insertCell(); td.textContent = v; if (i === 0) td.className = "mono"; });
+      if (k.issued_via !== "onboarding-ui") { const tag = document.createElement("span"); tag.className = "tag"; tag.textContent = "other"; tr.cells[0].append(" ", tag); }
+      const actions = tr.insertCell(); actions.className = "actions";
+      if (k.alias) {
+        const re = document.createElement("button"); re.textContent = "Re-issue";
+        re.onclick = () => act("reissue", k.alias, `Revoke the current key for ${k.alias} and issue a new one?`);
+        const rv = document.createElement("button"); rv.textContent = "Revoke"; rv.className = "danger";
+        rv.onclick = () => act("revoke", k.alias, `Revoke the key for ${k.alias}? The developer loses access immediately.`);
+        actions.append(re, " ", rv);
+      }
+    }
+  }
+
+  async function loadKeys() {
+    try {
+      allKeys = (await api("api/keys")).keys;
+      setMsg($("keys-msg"), "");
+      renderKeys();
+    } catch (e) { setMsg($("keys-msg"), `Could not load keys: ${e.message}`, "error"); }
+  }
+
+  async function act(kind, email, question) {
+    if (!confirm(question)) return;
+    try {
+      const data = await api(`api/keys/${kind}`, { email });
+      if (kind === "reissue") { showResult(data); setMsg($("keys-msg"), `New key issued for ${email}; the old one is revoked.`, "ok"); }
+      else setMsg($("keys-msg"), `Revoked ${email}.`, "ok");
+    } catch (e) { setMsg($("keys-msg"), e.message, "error"); }
+    loadKeys();
+  }
+
+  $("issue-form").addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const email = $("email").value.trim();
+    $("issue-btn").disabled = true;
+    setMsg($("issue-msg"), "Issuing…");
+    try {
+      showResult(await api("api/keys", { email }));
+      setMsg($("issue-msg"), "");
+      $("email").value = "";
+      loadKeys();
+    } catch (e) {
+      const exists = /already exists/i.test(e.message);
+      setMsg($("issue-msg"), exists ? `${email} already has a key. Use Re-issue in the list below to replace it.` : e.message, "error");
+    } finally { $("issue-btn").disabled = false; }
+  });
+
+  $("r-download").onclick = () => lastFile && download(lastFile);
+  $("r-copy").onclick = () => navigator.clipboard.writeText($("r-cmd").textContent);
+  $("r-dismiss").onclick = () => { $("result").hidden = true; lastFile = null; };
+  $("refresh").onclick = loadKeys;
+  $("show-all").onchange = renderKeys;
+
+  loadStatus();
+  loadKeys();
+</script>
+</body>
+</html>

@@ -1,4 +1,36 @@
-localhost {
+# Clients send no SNI when connecting to an IP address, and inside Docker Caddy can't match the
+# host's IP itself, so name the certificate to use for those connections (PROXY_DEFAULT_SNI).
+{
+  default_sni {$PROXY_DEFAULT_SNI:localhost}
+}
+
+# Site names come from PROXY_SITES (default: localhost). A shared proxy lists its hostname too,
+# e.g. PROXY_SITES="localhost, ai-proxy.corp.example"; tls internal issues a cert for each.
+{$PROXY_SITES:localhost} {
   tls internal
-  reverse_proxy litellm:4000
+
+  # Public root certificate of Caddy's local CA, for proxy/scripts/install-ca.ps1.
+  # Only root.crt is served; every other path (including root.key) goes to LiteLLM.
+  handle /ca.crt {
+    root * /data/caddy/pki/authorities/local
+    rewrite * /root.crt
+    header Content-Type application/x-x509-ca-cert
+    file_server
+  }
+
+  # Admin onboarding UI (onboarding-ui/). Basic auth from ONBOARDING_ADMIN_USER/_HASH in .env.
+  # The default hash is of a discarded random password, so the UI stays locked until one is set.
+  redir /admin/onboarding /admin/onboarding/
+  handle_path /admin/onboarding/* {
+    basic_auth {
+      {$ONBOARDING_ADMIN_USER:admin} {$ONBOARDING_ADMIN_HASH:$2a$14$7xrQnPR.Du64.rQ0f.MhxOzysUGXx8w/FVN6lLqy0umjash2zpKdy}
+    }
+    reverse_proxy onboarding:8000 {
+      header_up X-Admin-User {http.auth.user.id}
+    }
+  }
+
+  handle {
+    reverse_proxy litellm:4000
+  }
 }

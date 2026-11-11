@@ -3,6 +3,13 @@ services:
     image: caddy:2-alpine
     ports:
       - "443:443"
+    environment:
+      PROXY_SITES: "${PROXY_SITES:-localhost}"
+      PROXY_DEFAULT_SNI: "${PROXY_DEFAULT_SNI:-localhost}"
+      ONBOARDING_ADMIN_USER: "${ONBOARDING_ADMIN_USER:-admin}"
+      # bcrypt hash (caddy hash-password); single-quote it in .env. The default is the hash of a discarded
+      # random password, so the onboarding UI stays locked until one is set ($$ escapes compose's $).
+      ONBOARDING_ADMIN_HASH: "${ONBOARDING_ADMIN_HASH:-$$2a$$14$$7xrQnPR.Du64.rQ0f.MhxOzysUGXx8w/FVN6lLqy0umjash2zpKdy}"
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
@@ -12,9 +19,12 @@ services:
     restart: unless-stopped
 
   litellm:
-    image: ghcr.io/berriai/litellm:main-stable
+    # Pinned (v1.106.6): opencode_trace_attributes.py relies on LiteLLM internals, so re-run
+    # the Step 7 checks in docs/proxy-setup.md when changing this.
+    image: ghcr.io/berriai/litellm:main-stable@sha256:37e2dafb088a7723beb998590682957386dfc83ffea1848486f8e0e5cfac0b06
     volumes:
       - ./litellm-config.yaml:/app/config.yaml:ro
+      - ./opencode_trace_attributes.py:/app/opencode_trace_attributes.py:ro
     environment:
       LITELLM_MASTER_KEY: "${LITELLM_MASTER_KEY}"
       OTEL_EXPORTER_OTLP_ENDPOINT: "${OTEL_EXPORTER_OTLP_ENDPOINT:-http://host.docker.internal:4317}"
@@ -28,6 +38,23 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    restart: unless-stopped
+
+  # Admin onboarding UI, served by Caddy at /admin/onboarding/ behind basic auth.
+  # Reads only the public CA certificate written by scripts/export-ca.ps1, never Caddy's data volume.
+  onboarding:
+    build: ./onboarding-ui
+    environment:
+      LITELLM_MASTER_KEY: "${LITELLM_MASTER_KEY}"
+      LITELLM_URL: http://litellm:4000
+      # URL developers reach the proxy at; written into onboarding files.
+      PUBLIC_PROXY_URL: "${PUBLIC_PROXY_URL:-https://localhost}"
+      OPENCODE_VERSION: "${OPENCODE_VERSION:-2.0.29}"
+    volumes:
+      - ./certs:/certs:ro
+      - ../onboarding/bootstrap.ps1:/app/bootstrap.ps1:ro
+    depends_on:
+      - litellm
     restart: unless-stopped
 
   postgres:

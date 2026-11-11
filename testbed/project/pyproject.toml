@@ -1,0 +1,9 @@
+[project]
+name = "shopcart"
+version = "0.1.0"
+description = "Small shopping-cart library used as the agentic coding testbed project"
+requires-python = ">=3.10"
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

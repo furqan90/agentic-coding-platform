@@ -46,30 +46,31 @@ LiteLLM prints `LiteLLM: Proxy initialized` when ready.
 
 ## Step 4 — trust Caddy's local CA (one-time, per machine)
 
-Caddy generates a root CA on first start and stores it in the `caddy_data` Docker volume. Export it and add it to the Windows trusted root store.
+Caddy generates a root CA on first start and stores it in the `caddy_data` Docker volume (`root.crt` and its private key `root.key`). Every certificate Caddy serves is signed by it. Clients need the public `root.crt`; `root.key` never leaves the volume.
 
-Run in an **elevated (Administrator) PowerShell**:
-
-```powershell
-docker compose cp caddy:/data/caddy/pki/authorities/local/root.crt caddy-root.crt
-certutil -addstore -f "ROOT" caddy-root.crt
-```
-
-After this, browsers, `curl` and other tools that use the Windows store trust `https://localhost` without certificate warnings.
-
-**OpenCode does not use the Windows store.** It runs on Bun, which only trusts its bundled CA list plus `NODE_EXTRA_CA_CERTS`. Even with the root installed above, OpenCode fails with `UNABLE_TO_GET_ISSUER_CERT_LOCALLY` until `NODE_EXTRA_CA_CERTS` points at `caddy-root.crt` (no admin rights needed):
+Export it and check that Caddy's sites chain to it:
 
 ```powershell
-# Persist for the user (picked up by newly started processes)
-[Environment]::SetEnvironmentVariable('NODE_EXTRA_CA_CERTS', 'C:\Work\Projects\agentic-coding-platform\proxy\caddy-root.crt', 'User')
+.\proxy\scripts\export-ca.ps1
 ```
 
-Check that the exported file matches the root Caddy is serving:
+This writes `proxy\certs\proxy-root-ca.crt` (gitignored) and prints its SHA-256 fingerprint and an `OK` line per site. Then install it for OpenCode (no admin rights needed):
 
 ```powershell
-echo | openssl s_client -connect localhost:443 -servername localhost -CAfile caddy-root.crt 2>&1 | Select-String 'Verify return code'
-# Expected: Verify return code: 0 (ok)
+.\proxy\scripts\install-ca.ps1 -CertFile .\proxy\certs\proxy-root-ca.crt
 ```
+
+`install-ca.ps1` copies the certificate to `%USERPROFILE%\.agentic-coding\proxy-root-ca.crt`, sets `NODE_EXTRA_CA_CERTS` at user level, and checks that `https://localhost` presents a certificate signed by it. It refuses, and installs nothing, if the check fails or `NODE_EXTRA_CA_CERTS` already points at another file (`-Force` to replace). Then restart OpenCode Desktop and VS Code (Step 6).
+
+For browsers, `curl` and other tools that use the Windows store, also import it there, in an **elevated (Administrator) PowerShell**:
+
+```powershell
+certutil -addstore -f "ROOT" proxy\certs\proxy-root-ca.crt
+```
+
+Set `NODE_EXTRA_CA_CERTS` whether or not you import it into the Windows store. It is Node and Bun's documented way to add a CA, and it doesn't depend on the build. In testing, OpenCode 2.0.29 behaved differently in two cases. An early run through the Desktop service failed with `UNABLE_TO_GET_ISSUER_CERT_LOCALLY` without the variable. On 2026-11-11 an `opencode run --standalone` succeeded without it on a machine that had the root in the Windows store. Don't rely on the Windows store alone.
+
+If the `caddy_data` volume is ever deleted (e.g. `docker compose down -v`), Caddy creates a **new** CA on the next start. The old file stops working and OpenCode fails with `UNABLE_TO_GET_ISSUER_CERT_LOCALLY`. Repeat this step on every client.
 
 ## Step 5 — issue a virtual key per developer
 
@@ -92,8 +93,9 @@ Set the virtual key in the developer's shell (add to `$PROFILE` to persist):
 
 ```powershell
 $env:OPENCODE_PROXY_API_KEY = "sk-abc123..."
-$env:NODE_EXTRA_CA_CERTS = "C:\Work\Projects\agentic-coding-platform\proxy\caddy-root.crt"
 ```
+
+(`NODE_EXTRA_CA_CERTS` is already set at user level by `install-ca.ps1` in Step 4. Start a new shell to pick it up.)
 
 `opencode.json` reads the key with OpenCode's substitution syntax, `"apiKey": "{env:OPENCODE_PROXY_API_KEY}"`. Shell-style `${OPENCODE_PROXY_API_KEY}` is **not** expanded. OpenCode sends it literally, and LiteLLM rejects it with `LiteLLM Virtual Key expected. Received=${OP****KEY}`.
 
@@ -128,7 +130,7 @@ To test the proxy path without the DGX Spark, point the alias at Ollama on the w
 ```yaml
   - model_name: qwen3-coder:30b-32k
     litellm_params:
-      model: ollama/gpt-oss:20b                 # any model listed by `ollama list`
+      model: ollama_chat/gpt-oss:20b            # any model listed by `ollama list`; keep the ollama_chat/ prefix
       api_base: http://host.docker.internal:11434
 ```
 
@@ -138,7 +140,9 @@ Then `docker compose restart litellm`. Check that the container can reach host O
 docker exec proxy-litellm-1 python -c "import urllib.request;print(urllib.request.urlopen('http://host.docker.internal:11434/api/tags',timeout=5).read()[:200])"
 ```
 
-This only proves the plumbing (TLS → key auth → routing → Ollama). The substitute model may not follow the prompt exactly; `gpt-oss:20b` answered `{ "PROXY_OK": null }`. While the fallback is in place, the "Qwen3-Coder" alias is served by a different model. Revert to `ollama/qwen3-coder:30b-32k` / `http://spark-570a:11434` when the Spark is back.
+This only proves the plumbing (TLS → key auth → routing → Ollama). The substitute model may not follow the prompt exactly; `gpt-oss:20b` answered `{ "PROXY_OK": null }`. While the fallback is in place, the "Qwen3-Coder" alias is served by a different model. Revert to `ollama_chat/qwen3-coder:30b-32k` / `http://spark-570a:11434` when the Spark is back.
+
+Use the `ollama_chat/` prefix, not `ollama/`. `ollama_chat/` calls Ollama's `/api/chat` and passes OpenCode's tools natively. `ollama/` calls `/api/generate`, pastes the tools into the prompt and sets `format: json`, so the model can only answer with JSON. Every reply is parsed as a tool call, and an agent turn never ends with a text answer.
 
 ## Step 7 — verify traces reach LangFuse
 
@@ -157,19 +161,99 @@ After the smoke test completes:
   ```powershell
   curl.exe -s http://localhost:8889/metrics | Select-String 'service_name="litellm".*tl_project="agentic-coding-platform"'
   ```
+- OpenCode requests are labelled by `proxy/opencode_trace_attributes.py`. A LiteLLM upgrade can break this hook, so re-run this check after changing the pinned image:
+  ```powershell
+  curl.exe -s http://localhost:8889/metrics | Select-String 'agent_name="opencode".*span_name="Received Proxy Server Request"'
+  ```
 - In LangFuse (`http://localhost:3000`) the trace appears in the **agentic-coding-platform** project, not in the default project, with:
+  - Name `opencode`, and a Session ID matching OpenCode's session (`ses_…`). The name is fixed because OpenCode's requests don't say which agent (`build`, `plan`) is running.
   - `gen_ai.request.model = qwen3-coder:30b-32k`
   - No PII fields (`user.email`, `user.ip`, `client.ssn` are redacted by the OTEL Collector processor)
 - Grafana's Agent Ops dashboard can be filtered with its **Project** variable. RED panels include LiteLLM; the cost panel does not, because `agent_tokens_total` and `agent_cost_usd_total` come from the platform's SDK, which LiteLLM doesn't use.
 
 `LANGFUSE_PROJECT` here is only a compose variable that fills in `OTEL_RESOURCE_ATTRIBUTES`; LiteLLM itself doesn't read it.
 
+## Step 8 — try a real coding task
+
+[testbed/README.md](../testbed/README.md) has a sample project and three tasks (bug fix, feature, test repair) to run through OpenCode from the CLI or the VS Code extension, with pass/fail checks and the session ID to look up in LangFuse:
+
+```powershell
+.\testbed\scripts\setup.ps1
+.\testbed\scripts\run-task.ps1 -Task 01
+```
+
+## Developer machine checklist
+
+For a developer whose machine runs its own proxy (the setup above). Steps 1–3 bring up the stacks; then:
+
+1. **CA:** `.\proxy\scripts\export-ca.ps1`, then `.\proxy\scripts\install-ca.ps1 -CertFile .\proxy\certs\proxy-root-ca.crt` (Step 4). Optionally import it into the Windows store for browsers and curl.
+2. **Key:** get a virtual key (Step 5) and persist it:
+   `[Environment]::SetEnvironmentVariable('OPENCODE_PROXY_API_KEY', 'sk-...', 'User')`
+3. **Restart** OpenCode Desktop (fully quit, including the tray/background service) and VS Code. They keep the environment they were started with.
+4. **Check:** in a new shell,
+   ```powershell
+   [Environment]::GetEnvironmentVariable('NODE_EXTRA_CA_CERTS','User')   # %USERPROFILE%\.agentic-coding\proxy-root-ca.crt
+   [bool]$env:OPENCODE_PROXY_API_KEY                                    # True
+   opencode run --model proxy/qwen3-coder:30b-32k "reply with exactly: PROXY_OK"
+   ```
+   Then try the same prompt from the VS Code extension, or run a testbed task (Step 8).
+
+## Shared proxy (one proxy for many developers)
+
+If one machine runs the proxy for the team, developers don't run Docker at all. They connect to the proxy host by name, and each machine needs that proxy's root certificate.
+
+### Admin, once
+
+1. Pick a host name every developer can resolve, e.g. `ai-proxy.corp.example`, and add it to `proxy/.env`:
+   ```
+   PROXY_SITES=localhost, ai-proxy.corp.example
+   ```
+   Recreate Caddy: `docker compose --env-file .env up -d caddy`. Caddy issues a certificate for each name from its local CA (`tls internal`). Port 443 must be reachable from developer machines (firewall).
+
+   To let clients connect by **IP address** (e.g. `PROXY_SITES=localhost, 172.19.50.206` for a test from Windows Sandbox), also set `PROXY_DEFAULT_SNI=172.19.50.206`. Clients send no TLS server name for an IP. Inside Docker, Caddy can't match the host's IP to its certificate, so without this every handshake by IP fails. Only one IP can be the default. A DHCP address can change, so prefer a host name beyond testing.
+2. Export the CA and check every name:
+   ```powershell
+   .\proxy\scripts\export-ca.ps1
+   ```
+   All names must show `OK`. Note the `fingerprint: SHA256 …` line.
+3. Publish the fingerprint through a channel developers already trust: the team wiki, an internal chat channel, or onboarding mail. **Not** through the proxy itself. The fingerprint is what lets a developer detect a forged certificate. Optionally also share `proxy\certs\proxy-root-ca.crt`, which is public and safe to send.
+4. Issue each developer a key and onboarding file from the admin UI at `https://ai-proxy.corp.example/admin/onboarding/` (setup: [onboarding/README.md](../onboarding/README.md), "Admin UI"). Send the file and `onboarding/bootstrap.ps1` through a private channel. Bootstrap does the developer steps below in one go. Without the UI, use Step 5 against `https://ai-proxy.corp.example/key/generate`.
+
+Never copy `root.key` or `intermediate.key` off the proxy host. Anyone holding `root.key` can issue certificates every client trusts. Back up the `caddy_data` volume instead. If it is lost, Caddy creates a new CA and every developer must reinstall.
+
+### Developer, once per machine
+
+1. Install the CA from the proxy, verified against the published fingerprint:
+   ```powershell
+   .\proxy\scripts\install-ca.ps1 -ProxyUrl https://ai-proxy.corp.example -Fingerprint <SHA256 from the admin>
+   ```
+   The script downloads `https://ai-proxy.corp.example/ca.crt`, compares its fingerprint, and installs only on a match. Then it checks that the proxy's certificate chains to it for that host name. Alternatively, use `-CertFile <file from the admin>`; add `-Fingerprint` to verify that too.
+2. Persist the virtual key: `[Environment]::SetEnvironmentVariable('OPENCODE_PROXY_API_KEY', 'sk-...', 'User')`.
+3. Point OpenCode at the shared proxy. In the project's `opencode.json`, set `provider.proxy.options.baseURL` to `https://ai-proxy.corp.example/v1`.
+4. Restart OpenCode Desktop and VS Code, and run the check in the checklist above.
+
+`install-ca.ps1` refuses, and changes nothing, when:
+
+- the fingerprint is missing or wrong
+- the certificate is not a CA
+- the proxy doesn't present a certificate for that host name signed by it
+- the name isn't in `PROXY_SITES` (TLS handshake fails)
+- `NODE_EXTRA_CA_CERTS` already points at a different file (`-Force` to replace it, or combine both PEM files into one)
+
+`-Scope Process` sets the variable for the current shell only, which is useful for trying it out.
+
+### Longer term
+
+`tls internal` with a per-proxy CA is fine for a pilot. For organisation-wide use, have IT issue a certificate for the proxy's host name from the **company's internal CA**, which managed machines already trust, and configure Caddy with it (`tls <cert> <key>`). Developers then skip the CA step entirely. Whether `NODE_EXTRA_CA_CERTS` is still needed then depends on the Windows-store behaviour described in Step 4, so test it on a clean machine.
+
 ## Troubleshooting
 
 | Symptom | Likely cause | Fix |
 |---------|-------------|-----|
 | `provider.no-route` in OpenCode | Model name mismatch | `model_name` in `litellm-config.yaml` must equal what OpenCode sends (`qwen3-coder:30b-32k`) |
-| TLS error on `https://localhost` | CA not trusted | Redo Step 4; check `certutil -verifystore ROOT caddy-root.crt` |
+| TLS error on `https://localhost` | CA not trusted | Redo Step 4; `export-ca.ps1` shows whether each site chains to the exported root |
+| `install-ca.ps1`: `TLS handshake with <host> failed` | Host name not in `PROXY_SITES`, or Caddy not recreated after changing it | Use a listed name; `docker compose --env-file .env up -d caddy` |
+| `install-ca.ps1`: `Fingerprint mismatch` | Wrong value, a new CA after the `caddy_data` volume was recreated, or something intercepting the connection | Check the fingerprint with the admin (`export-ca.ps1` prints the current one). Don't install until they match |
 | `UNABLE_TO_GET_ISSUER_CERT_LOCALLY` in OpenCode, but `curl`/openssl verify fine | OpenCode (Bun) ignores the Windows store, or the Desktop background service was started without `NODE_EXTRA_CA_CERTS` | Set `NODE_EXTRA_CA_CERTS`; use `opencode run --standalone` or restart OpenCode Desktop (Step 6) |
 | `LiteLLM Virtual Key expected. Received=${OP****KEY}` | `opencode.json` uses `${VAR}` syntax | Use `"apiKey": "{env:OPENCODE_PROXY_API_KEY}"` |
 | `UnsupportedParamsError: ollama does not support parameters: ['store']` | OpenAI-only param forwarded to Ollama | Set `drop_params: true` under `litellm_settings` |
@@ -178,5 +262,7 @@ After the smoke test completes:
 | No traces in LangFuse | OTEL Collector not reachable | Check `OTEL_EXPORTER_OTLP_ENDPOINT` in `.env` and that the observability stack is up |
 | LiteLLM logs `BadStatusLine('\x00\x00\x06\x04…')` / `Failed to export spans batch`, no traces in LangFuse | LiteLLM defaults to OTLP/HTTP but `:4317` is the collector's gRPC port | Keep `OTEL_EXPORTER_OTLP_PROTOCOL: grpc` in `docker-compose.yaml`, or point the endpoint at `:4318` and drop it |
 | Traces land in the default LangFuse project instead of `agentic-coding-platform` | Slug not registered in the collector's `otel/projects.yaml`, typo in `LANGFUSE_PROJECT`, or collector not recreated after registering (unknown slugs fall back silently) | `docker exec proxy-litellm-1 env \| grep OTEL_RESOURCE`; check the slug in `projects.yaml`; regenerate and recreate the collector (Step 7) |
+| Trace name empty in LangFuse, no `agent_name="opencode"` metric | `opencode_trace_attributes.py` not mounted or not loaded, or a LiteLLM upgrade changed its hook; OpenCode's `traceparent` otherwise leaves LiteLLM's span without a root | Check the volume in `docker-compose.yaml` and `callbacks` in `litellm-config.yaml`, then `docker compose logs litellm` for import errors |
 | Collector logs `401` for `otlp_http/langfuse-agentic-coding-platform` | `LANGFUSE_OTEL_AUTH_AGENTIC_CODING_PLATFORM` missing or wrong in `otel/langfuse-projects.env` | Re-encode the project's `pk:sk`, recreate the collector |
+| `opencode run` never finishes; the model keeps rewriting/re-reading files, never replies in text, ignores "don't create files" | Model routed with `ollama/` (forced JSON, emulated tools) | Use `model: ollama_chat/<model>` in `litellm-config.yaml`, then `docker compose restart litellm` |
 | Context defaults to 8K | Model alias missing `num_ctx` | Verify `num_ctx: 32768` is in `litellm-config.yaml` under `litellm_params` |

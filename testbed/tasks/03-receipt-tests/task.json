@@ -1,0 +1,5 @@
+{
+  "kind": "test repair",
+  "protected": ["src"],
+  "min_tests": { "tests/test_receipt.py": 3 }
+}
